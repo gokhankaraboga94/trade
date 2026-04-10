@@ -248,3 +248,7 @@ const strategy = {
     return (priceDiff / entryPrice) * amount;
   }
 };
+
+try {
+  if (typeof module !== 'undefined' && module.exports) module.exports = strategy;
+} catch (e) {}

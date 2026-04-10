@@ -11,6 +11,11 @@ const bot = {
   tradeMarkers: [],
 
   async init() {
+    try {
+      if (this.updateInterval) clearInterval(this.updateInterval);
+      if (this.signalTimer) clearInterval(this.signalTimer);
+    } catch (e) {}
+
     this.settings = storage.getSettings();
     agent.load();                    // ajan hafızasını yükle
     this.loadSettings();
@@ -28,6 +33,13 @@ const bot = {
 
     // Periyodik strateji timer
     this._restartSignalTimer();
+
+    try {
+      const bs = (window.storage && typeof storage.getBotState === 'function')
+        ? storage.getBotState()
+        : null;
+      this.toggleTrading(!!bs?.running, { silent: true, persist: false });
+    } catch (e) {}
   },
 
   // Piyasa motorunu başlat
@@ -541,26 +553,39 @@ const bot = {
     storage.getTrades().forEach(t => { if (t.status === 'open') this.closeTrade(t, 'mass_close'); });
   },
 
-  toggleTrading() {
-    this.isRunning = !this.isRunning;
+  toggleTrading(forceState, opts = {}) {
+    const silent = !!opts.silent;
+    const persist = opts.persist !== false;
+    const next = typeof forceState === 'boolean' ? forceState : !this.isRunning;
+    this.isRunning = next;
     const btn     = document.getElementById('masterToggle');
     const bigBtn  = document.getElementById('bigStartBtn');
     const banner  = document.getElementById('startBanner');
     const mode    = this.settings.agentMode ? '🤖 AJAN' : '📊 KLASİK';
 
+    try {
+      if (persist && window.storage && typeof storage.saveBotState === 'function') {
+        storage.saveBotState({ running: this.isRunning, updatedAt: new Date().toISOString() });
+      }
+    } catch (e) {}
+
     if (this.isRunning) {
       if (btn)    { btn.textContent = '⏹ Durdur'; btn.className = 'btn btn-danger px-3 py-2 text-xs'; }
       if (bigBtn) { bigBtn.textContent = '⏹ Durdur'; bigBtn.style.background = 'linear-gradient(135deg,#ef4444,#dc2626)'; }
       if (banner) banner.style.display = 'none';
-      this._log(`Robot BAŞLATILDI [${mode}] — Sinyal bekleniyor...`, 'buy');
-      this._showToast(`Robot başlatıldı [${mode}]`, 'green');
+      if (!silent) {
+        this._log(`Robot BAŞLATILDI [${mode}] — Sinyal bekleniyor...`, 'buy');
+        this._showToast(`Robot başlatıldı [${mode}]`, 'green');
+      }
       setTimeout(() => this._runStrategy(), 800);
     } else {
       if (btn)    { btn.textContent = '▶ Başlat'; btn.className = 'btn btn-success px-3 py-2 text-xs'; }
       if (bigBtn) { bigBtn.textContent = '▶ Başlat'; bigBtn.style.background = 'linear-gradient(135deg,#10b981,#059669)'; }
       if (banner) banner.style.display = 'block';
-      this._log('Robot DURDURULDU', 'warn');
-      this._showToast('Robot durduruldu', 'red');
+      if (!silent) {
+        this._log('Robot DURDURULDU', 'warn');
+        this._showToast('Robot durduruldu', 'red');
+      }
     }
   },
 

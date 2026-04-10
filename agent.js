@@ -254,7 +254,7 @@ const agent = {
   // ─── Kalıcı Depolama ───────────────────────────────────────
   save() {
     try {
-      if (window.storage && typeof storage.saveAgentState === 'function') {
+      if (typeof storage !== 'undefined' && typeof storage.saveAgentState === 'function') {
         storage.saveAgentState({
           memory:        this.memory,
           pendingOrders: this.pendingOrders,
@@ -267,7 +267,7 @@ const agent = {
 
   load() {
     try {
-      const saved = (window.storage && typeof storage.getAgentState === 'function')
+      const saved = (typeof storage !== 'undefined' && typeof storage.getAgentState === 'function')
         ? storage.getAgentState()
         : null;
       if (!saved) return;
@@ -290,3 +290,7 @@ const agent = {
     this.save();
   },
 };
+
+try {
+  if (typeof module !== 'undefined' && module.exports) module.exports = agent;
+} catch (e) {}

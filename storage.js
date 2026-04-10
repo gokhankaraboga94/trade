@@ -7,6 +7,7 @@ const storage = {
   _settings: null,
   _prices: [],
   _agentState: null,
+  _botState: null,
 
   setCurrentUser(user) {
     this._currentUserId = user?.id || null;
@@ -19,6 +20,7 @@ const storage = {
     this._settings = null;
     this._prices = [];
     this._agentState = null;
+    this._botState = null;
   },
 
   _encodeKey(key) {
@@ -88,11 +90,13 @@ const storage = {
         this._settings = this._defaults();
         this._prices = [];
         this._agentState = null;
+        this._botState = { running: false, updatedAt: new Date().toISOString() };
 
         this._remoteSet(`${root}/trades`, this._trades);
         this._remoteSet(`${root}/history`, this._history);
         this._remoteSet(`${root}/settings`, this._settings);
         this._remoteSet(`${root}/prices`, this._prices);
+        this._remoteSet(`${root}/botState`, this._botState);
         return;
       }
 
@@ -101,6 +105,7 @@ const storage = {
       this._settings = { ...this._defaults(), ...(data.settings || {}) };
       this._prices = Array.isArray(data.prices) ? data.prices : [];
       this._agentState = data.agent || null;
+      this._botState = data.botState || { running: false, updatedAt: new Date().toISOString() };
     } catch (e) {}
   },
 
@@ -221,5 +226,15 @@ const storage = {
 
   getAgentState() {
     return this._agentState;
+  },
+
+  saveBotState(botState) {
+    this._botState = botState || null;
+    const root = this._userRoot();
+    if (root) this._remoteSet(`${root}/botState`, botState);
+  },
+
+  getBotState() {
+    return this._botState;
   }
 };
