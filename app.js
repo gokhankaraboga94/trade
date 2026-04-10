@@ -35,7 +35,7 @@ const bot = {
     this._restartSignalTimer();
 
     try {
-      const bs = (window.storage && typeof storage.getBotState === 'function')
+      const bs = (typeof storage !== 'undefined' && typeof storage.getBotState === 'function')
         ? storage.getBotState()
         : null;
       this.toggleTrading(!!bs?.running, { silent: true, persist: false });
@@ -564,7 +564,7 @@ const bot = {
     const mode    = this.settings.agentMode ? '🤖 AJAN' : '📊 KLASİK';
 
     try {
-      if (persist && window.storage && typeof storage.saveBotState === 'function') {
+      if (persist && typeof storage !== 'undefined' && typeof storage.saveBotState === 'function') {
         storage.saveBotState({ running: this.isRunning, updatedAt: new Date().toISOString() });
       }
     } catch (e) {}
