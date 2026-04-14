@@ -9,6 +9,8 @@ const bot = {
   signalTimer: null,
   lastSignalTime: 0,
   tradeMarkers: [],
+  baseBalance: 0,        // Robot başlatılınca kaydedilen bakiye
+  cycleTarget: 0.05,    // Ana bakiyenin %5'i kadar kâr hedefi (ayarlanabilir)
 
   async init() {
     try {
@@ -113,7 +115,7 @@ const bot = {
   },
 
   loadSettings() {
-    document.getElementById('maxTrades').value       = this.settings.maxTrades      || 5;
+    document.getElementById('maxTrades').value       = this.settings.maxTrades      || 10;
     document.getElementById('tradeAmount').value     = this.settings.tradeAmount    || 100;
     document.getElementById('tpPercent').value       = this.settings.tpPercent      || 1.5;
     document.getElementById('strategySelect').value  = this.settings.strategy       || 'mixed';
@@ -313,11 +315,35 @@ const bot = {
     const trades = storage.getTrades();
     trades.forEach(t => { if (t.status === 'open') this._checkExits(t); });
 
+    // ─ Döngü TP kontrolü: anlık bakıye başlangıçtan cycleTarget kadar yükseldiyse sıfırla
+    if (this.settings.agentMode && this.isRunning && this.baseBalance > 0) {
+      const currentBal = auth.currentUser?.balance || 0;
+      const targetBal  = this.baseBalance * (1 + this.cycleTarget);
+      if (currentBal >= targetBal) {
+        const profit = (currentBal - this.baseBalance).toFixed(2);
+        this._log(`🎯 Döngü tamamlandı! +$${profit} kâr → tüm işlemler kapatılıyor, yeniden başlıyor...`, 'buy');
+        this._showToast(`🎯 +$${profit} — Yeni döngü başlıyor`, 'green');
+        // Kârlı açık işlemleri kapat (zararlıları bırak)
+        storage.getTrades().filter(t => t.status === 'open').forEach(t => {
+          const p     = market.currentPrice;
+          const gross = p ? strategy.calculateProfit(t.entryPrice, p, t.amount, t.direction) : -1;
+          const fee   = t.amount * 2 * agent.state.feeRate;
+          if (gross - fee > 0) this.closeTrade(t, 'tp');
+        });
+        // Yeni baz bakiyeyi güncelle, agent'ı öğen
+        this.baseBalance = auth.currentUser?.balance || 0;
+        agent._adapt && agent._adapt();
+        // Kısa bir gecikme sonra yeni işlemler aç
+        setTimeout(() => { if (this.isRunning) this._runStrategy(); }, 1500);
+        return;
+      }
+    }
+
     // Limit emir kontrolu (her tick — gerçek zamanlı)
     if (this.settings.agentMode && market.currentPrice) {
       agent.checkPendingOrders(market.currentPrice).forEach(order => {
         const open = storage.getTrades().filter(t => t.status === 'open');
-        if (open.length < (this.settings.maxTrades || 5) &&
+        if (open.length < (this.settings.maxTrades || 10) &&
             (auth.currentUser?.balance || 0) >= order.amount) {
           const label = order.direction === 'long' ? 'BUY LIMIT' : 'SELL LIMIT';
           this._log(`[⏳Limit] ${label} tetiklendi @ $${market.currentPrice.toLocaleString(undefined,{maximumFractionDigits:2})}`, order.direction === 'long' ? 'buy' : 'sell');
@@ -331,40 +357,76 @@ const bot = {
     if (this.settings.agentMode) this._updateAgentStats();
   },
 
-  // TP + Trailing SL + Statik SL + Zaman bazlı çıkış
+  // TP + Trailing TP — ajan modunda kâr takip ederek çıkış
   _checkExits(trade) {
     const p = market.currentPrice;
     if (!p) return;
 
-    // TP kontrolü
+    // Trailing TP parametreleri
+    const trailActivatePct = 0.5;  // TP mesafesinin %50 fazlası aşılınca trailing aktif
+    const trailBackPct     = 0.004; // Aktif trailing: peak'ten %0.4 geri çekilince kapat
+
     const tpHit = trade.direction === 'long' ? p >= trade.tpPrice : p <= trade.tpPrice;
-    if (tpHit) return this.closeTrade(trade, 'tp');
 
-    // Trailing SL kontrolü (aktifse)
-    if (trade.trailingSL != null) {
-      const tsHit = trade.direction === 'long' ? p <= trade.trailingSL : p >= trade.trailingSL;
-      if (tsHit) return this.closeTrade(trade, 'trailing_sl');
-    }
+    if (this.settings.agentMode) {
+      const gross = strategy.calculateProfit(trade.entryPrice, p, trade.amount, trade.direction);
+      const fee   = trade.amount * 2 * agent.state.feeRate;
+      if (gross - fee <= 0) return; // Kârsız — hiç kapatma
 
-    // Statik SL kontrolü (trailing yoksa)
-    if (trade.slPrice && trade.trailingSL == null) {
-      const slHit = trade.direction === 'long' ? p <= trade.slPrice : p >= trade.slPrice;
-      if (slHit) return this.closeTrade(trade, 'sl');
-    }
+      if (tpHit || trade.peakPrice != null) {
+        // Peak fiyatı güncelle
+        const newPeak = trade.direction === 'long'
+          ? Math.max(trade.peakPrice ?? p, p)
+          : Math.min(trade.peakPrice ?? p, p);
 
-    // Zaman bazlı çıkış
-    if (trade.holdUntil && Date.now() > trade.holdUntil) {
-      return this.closeTrade(trade, 'timeout');
-    }
+        if (newPeak !== trade.peakPrice) {
+          storage.updateTrade(trade.id, { ...trade, peakPrice: newPeak });
+          Object.assign(trade, { peakPrice: newPeak });
+        }
 
-    // Trailing stop güncelleme (ajan modu)
-    if (this.settings.agentMode && agent.shouldActivateTrailing(trade, p)) {
-      const newSL = agent.calcNewTrailingSL(trade, p);
-      if (agent.shouldUpdateTrailingSL(trade, newSL)) {
-        const updated = { ...trade, trailingSL: newSL, slPrice: newSL };
-        storage.updateTrade(trade.id, updated);
-        Object.assign(trade, updated); // yerel referansı güncelle
+        // Trailing aktivasyon eşiği: TP mesafesinin trailActivatePct kadar ötesine geçilmeli
+        const tpDist      = Math.abs(trade.tpPrice - trade.entryPrice);
+        const activateAt  = trade.direction === 'long'
+          ? trade.tpPrice + tpDist * trailActivatePct
+          : trade.tpPrice - tpDist * trailActivatePct;
+        const trailActive = trade.direction === 'long'
+          ? newPeak >= activateAt
+          : newPeak <= activateAt;
+
+        if (!trailActive) {
+          // Trailing henüz aktif değil — TP seviyesine geri düşerse minimum kârla kapat
+          const tpMissed = trade.direction === 'long' ? p < trade.tpPrice : p > trade.tpPrice;
+          if (tpMissed) {
+            this._log(`🎯 Min TP garantisi | $${p.toFixed(2)}`, 'buy');
+            return this.closeTrade(trade, 'tp');
+          }
+          return; // Aktivasyon bekleniyor
+        }
+
+        // Trailing aktif — peak'ten geri çekilme kontrolü
+        const pullback = trade.direction === 'long'
+          ? (newPeak - p) / newPeak
+          : (p - newPeak) / newPeak;
+
+        if (pullback >= trailBackPct) {
+          this._log(`🏹 Trailing TP | Peak: $${newPeak.toFixed(2)} → Geri: ${(pullback*100).toFixed(2)}%`, 'buy');
+          return this.closeTrade(trade, 'tp');
+        }
+        return; // Daha fazla kâr için bekle
       }
+    } else {
+      // Manuel/klasik mod: TP'ye ulaşınca direkt kapat
+      if (tpHit) return this.closeTrade(trade, 'tp');
+    }
+
+    // Zaman bazlı çıkış (yalnızca kârdaysa)
+    if (trade.holdUntil && Date.now() > trade.holdUntil) {
+      if (this.settings.agentMode) {
+        const gross = strategy.calculateProfit(trade.entryPrice, p, trade.amount, trade.direction);
+        const fee   = trade.amount * 2 * agent.state.feeRate;
+        if (gross - fee <= 0) return;
+      }
+      return this.closeTrade(trade, 'timeout');
     }
   },
 
@@ -374,7 +436,7 @@ const bot = {
     return this._runClassicStrategy();
   },
 
-  // ─── Ajan Modu (Dual Position) ──────────────────────────────────────────
+  // ─── Ajan Modu (Dual Position) ──────────────────────────────
   _runAgent() {
     const balance = auth.currentUser?.balance || 0;
     if (balance < 10) { this._log('Bakiye yetersiz', 'warn'); return; }
@@ -384,24 +446,46 @@ const bot = {
     if (result.paused) { this._log(`[Ajan] ${result.reason}`, 'warn'); return; }
 
     this._log(
-      `[Ajan] Dual Mod | ATR:${result.meta.atrPct}% TP:±${result.tpPct}% Trail@${(agent.state.trailingActivation*100).toFixed(0)}% | L×${agent.state.longSizeMult} S×${agent.state.shortSizeMult} | Pending:${agent.getPendingOrders().length}`,
+      `[Ajan] Dual Mod | ATR:${result.meta.atrPct}% TP:±${result.tpPct}% | L×${agent.state.longSizeMult} S×${agent.state.shortSizeMult} | Pending:${agent.getPendingOrders().length}`,
       'info'
     );
 
     const openTrades = storage.getTrades().filter(t => t.status === 'open');
-    const maxTrades  = this.settings.maxTrades || 5;
-    if (openTrades.length >= maxTrades) return;
+    const curPrice   = market.currentPrice;
+    const stepPct    = parseFloat(result.meta.atrPct) || 0.1;
 
-    const openLong  = openTrades.filter(t => t.direction === 'long').length;
-    const openShort = openTrades.filter(t => t.direction === 'short').length;
+    // Trend yönünü belirle (son mumların yönüne bak)
+    const candles  = market.candles;
+    const closes   = candles.slice(-5).map(c => c.close);
+    const trendUp  = closes[closes.length - 1] > closes[0];
+    const trendDir = trendUp ? 'long' : 'short';
 
-    // Her zaman 1 LONG + 1 SHORT tut (EnsureBalancedPositions gibi)
-    if (openLong === 0) {
-      this.openTrade('long',  result.long.amount,  result.long.tpPct,  '[Ajan] LONG');
+    // Yalnızca trend yönünde işlem aç
+    const openInDir = openTrades.filter(t => t.direction === trendDir);
+    const last      = [...openInDir].sort((a, b) => new Date(b.openedAt) - new Date(a.openedAt))[0];
+
+    // Son işlemden ATR kadar uzaklaşınca yeni seviye ekle
+    let canOpen = false;
+    if (!last) {
+      canOpen = true;
+    } else if (trendDir === 'long') {
+      canOpen = (last.entryPrice - curPrice) / last.entryPrice * 100 >= stepPct;
+    } else {
+      canOpen = (curPrice - last.entryPrice) / last.entryPrice * 100 >= stepPct;
     }
-    if (openShort === 0 && storage.getTrades().filter(t => t.status === 'open').length < maxTrades) {
-      this.openTrade('short', result.short.amount, result.short.tpPct, '[Ajan] SHORT');
+
+    if (canOpen && balance >= result[trendDir].amount) {
+      this.openTrade(trendDir, result[trendDir].amount, result[trendDir].tpPct, `[Ajan] ${trendDir.toUpperCase()}`);
     }
+
+    // Karşı yönde açık zarar eden pozisyon varsa kapat (yanlış yön temizliği)
+    const wrongDir = trendDir === 'long' ? 'short' : 'long';
+    openTrades.filter(t => t.direction === wrongDir).forEach(t => {
+      const gross = curPrice ? strategy.calculateProfit(t.entryPrice, curPrice, t.amount, t.direction) : -1;
+      const fee   = t.amount * 2 * agent.state.feeRate;
+      if (gross - fee > 0) this.closeTrade(t, 'tp'); // Kârdaysa kapat
+      // Zarardaysa beklet — döngü TP'de zaten kapat
+    });
   },
 
   _runClassicStrategy() {
@@ -422,7 +506,7 @@ const bot = {
     if (signal.action === 'hold' || signal.confidence < minConf) return;
 
     const openTrades = storage.getTrades().filter(t => t.status === 'open');
-    if (openTrades.length >= (this.settings.maxTrades || 5)) {
+    if (openTrades.length >= (this.settings.maxTrades || 10)) {
       this._log('Maks işlem limitine ulaşıldı', 'warn');
       return;
     }
@@ -449,8 +533,7 @@ const bot = {
     const entryPrice = market.currentPrice;
     if (!entryPrice) { this._showToast('Fiyat verisi yok!', 'red'); return; }
 
-    const tpPrice  = strategy.calculateTP(entryPrice, direction, tpPercent);
-    const slPrice  = extras.slPct  ? strategy.calculateSL(entryPrice, direction, extras.slPct) : null;
+    const tpPrice   = strategy.calculateTP(entryPrice, direction, tpPercent);
     const holdUntil = extras.holdSec ? Date.now() + extras.holdSec * 1000 : null;
     const trade = {
       id:        'trade_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
@@ -460,8 +543,6 @@ const bot = {
       amount,
       tpPrice,
       tpPercent,
-      slPrice,
-      slPercent: extras.slPct || null,
       holdUntil,
       status:    'open',
       reason,
@@ -478,15 +559,17 @@ const bot = {
     this.loadTrades();
     this.updateBalanceDisplay();
     const dirLabel = direction === 'long' ? '▲ LONG' : '▼ SHORT';
-    const slInfo   = slPrice ? ` SL:$${slPrice.toLocaleString(undefined,{maximumFractionDigits:4})}` : '';
     const holdInfo = holdUntil ? ` ⏱${extras.holdSec}sn` : '';
-    this._log(`${dirLabel} açıldı | $${entryPrice.toLocaleString(undefined,{maximumFractionDigits:4})} TP:${tpPercent}%${slInfo}${holdInfo} | ${reason}`, direction === 'long' ? 'buy' : 'sell');
+    this._log(`${dirLabel} açıldı | $${entryPrice.toLocaleString(undefined,{maximumFractionDigits:4})} TP:${tpPercent.toFixed(3)}%${holdInfo} | ${reason}`, direction === 'long' ? 'buy' : 'sell');
     this._showToast(`${dirLabel} @ $${entryPrice.toLocaleString(undefined,{maximumFractionDigits:2})}`, direction === 'long' ? 'green' : 'red');
   },
 
   closeTrade(trade, reason = 'manual') {
     const exitPrice = market.currentPrice;
-    const profit    = strategy.calculateProfit(trade.entryPrice, exitPrice, trade.amount, trade.direction);
+    const rawProfit = strategy.calculateProfit(trade.entryPrice, exitPrice, trade.amount, trade.direction);
+    // Gerçekçi round-trip işlem ücreti: giriş + çıkış toplamının %0.1'i
+    const tradeFee  = parseFloat((trade.amount * 2 * agent.state.feeRate).toFixed(4));
+    const profit    = parseFloat((rawProfit - tradeFee).toFixed(4));
 
     storage.updateTrade(trade.id, {
       ...trade, status: 'closed', exitPrice, profit,
@@ -502,8 +585,8 @@ const bot = {
       const pauseMsg = agent.learn({ profit, direction: trade.direction, closeReason: reason });
       if (pauseMsg) this._log(`[Ajan] ${pauseMsg}`, 'warn');
 
-      // TP vurunca: aynı yönü yeniden aç + karşı taraf limit emir (MQL5 mantığı)
-      if (reason === 'tp') {
+      // TP vurunca: aynı yönü yeniden aç + karşı taraf limit emir (DCA işlemlerde atla)
+      if (reason === 'tp' && !trade.reason?.includes('[DCA]')) {
         const result = agent.decideDual(market.candles, auth.currentUser?.balance || 0);
         if (result && !result.paused) {
           setTimeout(() => {
@@ -538,7 +621,7 @@ const bot = {
     this.updateBalanceDisplay();
     this.updateStats();
     const sign = profit >= 0 ? '+' : '';
-    const emoji = reason === 'tp' ? '🎯' : reason === 'trailing_sl' ? '🏃' : reason === 'sl' ? '🛡' : reason === 'timeout' ? '⏱' : '✋';
+    const emoji = reason === 'tp' ? '🎯' : reason === 'timeout' ? '⏱' : '✋';
     this._log(`${emoji} İşlem kapandı [${reason}] | ${sign}$${profit.toFixed(2)}`, profit >= 0 ? 'buy' : 'sell');
     this._showToast(`${emoji} ${reason.toUpperCase()} | ${sign}$${profit.toFixed(2)}`, profit >= 0 ? 'green' : 'red');
   },
@@ -570,11 +653,13 @@ const bot = {
     } catch (e) {}
 
     if (this.isRunning) {
+      // Başlangıç bakiyesini kaydet
+      this.baseBalance = auth.currentUser?.balance || 0;
       if (btn)    { btn.textContent = '⏹ Durdur'; btn.className = 'btn btn-danger px-3 py-2 text-xs'; }
       if (bigBtn) { bigBtn.textContent = '⏹ Durdur'; bigBtn.style.background = 'linear-gradient(135deg,#ef4444,#dc2626)'; }
       if (banner) banner.style.display = 'none';
       if (!silent) {
-        this._log(`Robot BAŞLATILDI [${mode}] — Sinyal bekleniyor...`, 'buy');
+        this._log(`Robot BAŞLATILDI [${mode}] — Hedef: +$${(this.baseBalance * this.cycleTarget).toFixed(2)} kâr`, 'buy');
         this._showToast(`Robot başlatıldı [${mode}]`, 'green');
       }
       setTimeout(() => this._runStrategy(), 800);
@@ -660,7 +745,6 @@ const bot = {
           <div class="grid grid-cols-2 gap-1 text-xs">
             <span class="text-slate-400">Giriş: <span class="text-white mono">$${trade.entryPrice.toLocaleString(undefined,{maximumFractionDigits:4})}</span></span>
             <span class="text-slate-400">TP: <span class="text-emerald-400 mono">$${trade.tpPrice.toLocaleString(undefined,{maximumFractionDigits:4})}</span></span>
-            ${trade.slPrice ? `<span class="text-slate-400">SL: <span class="text-rose-400 mono">$${trade.slPrice.toLocaleString(undefined,{maximumFractionDigits:4})}</span></span>` : '<span></span>'}
             <span class="text-slate-400">Miktar: <span class="text-white mono">$${trade.amount}</span></span>
           </div>
           <div class="flex justify-between items-center">

@@ -2,7 +2,7 @@
 // AutoTrade Pro — Dual Position Agent
 // Strateji: Her zaman simetrik LONG + SHORT pozisyon tut
 // TP vurunca: aynı yönü yeniden aç + karşı taraf limit emir
-// Trailing Stop: TP mesafesinin %50'sine ulaşınca kâr kilitle
+// Kural: Sadece kârdayken kapat — SL yok
 // Öğrenme: Yön bazlı win rate → adaptif lot çarpanı
 // ═══════════════════════════════════════════════════════════════
 const agent = {
@@ -12,12 +12,9 @@ const agent = {
   pendingOrders: [],   // simüle edilmiş limit emirler (BUY/SELL LIMIT)
 
   state: {
-    // TP / Trailing parametreleri (ATR çarpanları)
-    tpMult:             1.0,   // ATR × tpMult = TP mesafesi
-    trailingMult:       0.5,   // Trailing SL mesafesi = tpDist × trailingMult
-    trailingActivation: 0.50,  // TP mesafesinin %50'sine ulaşınca trailing aktif
-    trailingStep:       0.10,  // Trailing SL güncelleme adımı (tpDist'in %10'u)
-    pendingMult:        0.8,   // ATR × pendingMult = limit emir mesafesi
+    // TP parametreleri (ATR çarpanları)
+    tpMult:      1.0,  // ATR × tpMult = TP mesafesi
+    pendingMult: 0.8,  // ATR × pendingMult = limit emir mesafesi
     sizePercent:        0.02,  // Bakiyenin %2'si temel lot
 
     // Genel istatistikler
@@ -33,6 +30,8 @@ const agent = {
     // Adaptif lot çarpanları (öğrenme ile değişir)
     longSizeMult:  1.0,
     shortSizeMult: 1.0,
+
+    feeRate: 0.001, // Gerçekçi işlem ücreti (%0.1 taker)
   },
 
   // ─── ATR (volatilite ölçüsü) ───────────────────────────────
@@ -63,9 +62,8 @@ const agent = {
     const currentPrice = candles[candles.length - 1].close;
     const atrPct       = (atr / currentPrice) * 100;
 
-    // TP ve trailing mesafeleri (ATR bazlı)
+    // TP ve limit emir mesafeleri (ATR bazlı)
     const tpPct      = parseFloat(Math.max(0.08, atrPct * this.state.tpMult).toFixed(4));
-    const trailPct   = parseFloat(Math.max(0.03, atrPct * this.state.trailingMult).toFixed(4));
     const pendingPct = parseFloat(Math.max(0.04, atrPct * this.state.pendingMult).toFixed(4));
 
     // Volatilite düzeltmeli lot hesabı
@@ -80,7 +78,6 @@ const agent = {
     return {
       paused:     false,
       tpPct,
-      trailPct,
       pendingPct,
       long:  { direction: 'long',  amount: longAmt,  tpPct },
       short: { direction: 'short', amount: shortAmt, tpPct },
@@ -126,36 +123,6 @@ const agent = {
   getPendingOrders() { return this.pendingOrders; },
 
   clearAllPending() { this.pendingOrders = []; this.save(); },
-
-  // ─── Trailing Stop ──────────────────────────────────────────
-  // TP mesafesinin trailingActivation kadarına ulaşıldıysa aktif
-  shouldActivateTrailing(trade, currentPrice) {
-    if (!trade.tpPrice) return false;
-    const tpDist     = Math.abs(trade.tpPrice - trade.entryPrice);
-    const profitDist = trade.direction === 'long'
-      ? currentPrice - trade.entryPrice
-      : trade.entryPrice - currentPrice;
-    return profitDist >= tpDist * this.state.trailingActivation;
-  },
-
-  // Trailing SL seviyesini hesapla (TP mesafesinin trailingMult oranı kadar geride)
-  calcNewTrailingSL(trade, currentPrice) {
-    const tpDist   = Math.abs(trade.tpPrice - trade.entryPrice);
-    const trailDist = tpDist * this.state.trailingMult;
-    return trade.direction === 'long'
-      ? currentPrice - trailDist
-      : currentPrice + trailDist;
-  },
-
-  // Trailing SL güncellemeli mi? (minimum adım kontrolü)
-  shouldUpdateTrailingSL(trade, newSL) {
-    if (trade.trailingSL == null) return true; // ilk aktivasyon
-    const tpDist = Math.abs(trade.tpPrice - trade.entryPrice);
-    const step   = tpDist * this.state.trailingStep;
-    return trade.direction === 'long'
-      ? newSL > trade.trailingSL + step
-      : newSL < trade.trailingSL - step;
-  },
 
   // ─── Öğrenme (işlem kapandığında çağrılır) ─────────────────
   learn(trade) {
@@ -211,15 +178,11 @@ const agent = {
                     Math.max(1, this.state.longTotal + this.state.shortTotal);
 
     if (totalWR > 0.65) {
-      // İyi performans → daha büyük TP hedefi, trailing daha erken aktif
-      this.state.tpMult           = parseFloat(Math.min(2.0,  this.state.tpMult + 0.05).toFixed(2));
-      this.state.trailingActivation = parseFloat(Math.max(0.30, this.state.trailingActivation - 0.02).toFixed(2));
-      this.state.sizePercent      = parseFloat(Math.min(0.06, this.state.sizePercent * 1.04).toFixed(4));
+      this.state.tpMult      = parseFloat(Math.min(2.0, this.state.tpMult + 0.05).toFixed(2));
+      this.state.sizePercent = parseFloat(Math.min(0.06, this.state.sizePercent * 1.04).toFixed(4));
     } else if (totalWR < 0.40) {
-      // Kötü performans → daha küçük TP, trailing daha geç aktif
-      this.state.tpMult           = parseFloat(Math.max(0.6,  this.state.tpMult - 0.05).toFixed(2));
-      this.state.trailingActivation = parseFloat(Math.min(0.70, this.state.trailingActivation + 0.02).toFixed(2));
-      this.state.sizePercent      = parseFloat(Math.max(0.01, this.state.sizePercent * 0.92).toFixed(4));
+      this.state.tpMult      = parseFloat(Math.max(0.6, this.state.tpMult - 0.05).toFixed(2));
+      this.state.sizePercent = parseFloat(Math.max(0.01, this.state.sizePercent * 0.92).toFixed(4));
     }
   },
 
@@ -242,7 +205,7 @@ const agent = {
       longSizeMult:  this.state.longSizeMult,
       shortSizeMult: this.state.shortSizeMult,
       tpMult:        this.state.tpMult.toFixed(2),
-      trailAct:      (this.state.trailingActivation * 100).toFixed(0),
+      trailAct:      '—',
       sizePercent:   (this.state.sizePercent * 100).toFixed(1),
       pendingCount:  this.pendingOrders.length,
       consLosses:    this.state.consecutiveLosses,
@@ -281,11 +244,10 @@ const agent = {
     this.memory        = [];
     this.pendingOrders = [];
     this.state = {
-      tpMult: 1.0, trailingMult: 0.5, trailingActivation: 0.50,
-      trailingStep: 0.10, pendingMult: 0.8, sizePercent: 0.02,
+      tpMult: 1.0, pendingMult: 0.8, sizePercent: 0.02,
       totalTrades: 0, totalPnL: 0, pauseUntil: 0, consecutiveLosses: 0,
       longWins: 0, longTotal: 0, shortWins: 0, shortTotal: 0,
-      longSizeMult: 1.0, shortSizeMult: 1.0,
+      longSizeMult: 1.0, shortSizeMult: 1.0, feeRate: 0.001,
     };
     this.save();
   },
