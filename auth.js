@@ -111,6 +111,24 @@ const auth = {
     document.getElementById('userDisplay').textContent = this.currentUser.name;
     storage.setCurrentUser(this.currentUser);
     await storage.pullUserData();
+
+    try {
+      storage.startRealtimeSync();
+    } catch (e) {}
+
+    try {
+      const db = (typeof storage !== 'undefined' && storage._getDb) ? storage._getDb() : null;
+      const uid = this.currentUser?.id;
+      if (db && uid) {
+        db.ref(`usersById/${uid}/balance`).on('value', (s) => {
+          const v = s ? s.val() : null;
+          if (typeof v === 'number') {
+            if (this.currentUser) this.currentUser.balance = v;
+            try { bot.updateBalanceDisplay(); } catch (e) {}
+          }
+        });
+      }
+    } catch (e) {}
     
     // Initialize bot
     await bot.init();

@@ -9,11 +9,27 @@ const storage = {
   _agentState: null,
   _botState: null,
 
+  _listeners: [],
+  _subscribers: [],
+
+  subscribe(fn) {
+    if (typeof fn !== 'function') return () => {};
+    this._subscribers.push(fn);
+    return () => {
+      try { this._subscribers = this._subscribers.filter(x => x !== fn); } catch (e) {}
+    };
+  },
+
+  _emitChange(type) {
+    try { this._subscribers.forEach(fn => { try { fn(type); } catch (e) {} }); } catch (e) {}
+  },
+
   setCurrentUser(user) {
     this._currentUserId = user?.id || null;
   },
 
   clearCurrentUser() {
+    try { this.stopRealtimeSync(); } catch (e) {}
     this._currentUserId = null;
     this._trades = [];
     this._history = [];
@@ -97,6 +113,7 @@ const storage = {
         this._remoteSet(`${root}/settings`, this._settings);
         this._remoteSet(`${root}/prices`, this._prices);
         this._remoteSet(`${root}/botState`, this._botState);
+        try { this._emitChange('bootstrap'); } catch (e) {}
         return;
       }
 
@@ -106,7 +123,55 @@ const storage = {
       this._prices = Array.isArray(data.prices) ? data.prices : [];
       this._agentState = data.agent || null;
       this._botState = data.botState || { running: false, updatedAt: new Date().toISOString() };
+      try { this._emitChange('pull'); } catch (e) {}
     } catch (e) {}
+  },
+
+  stopRealtimeSync() {
+    try {
+      const db = this._getDb();
+      if (db && Array.isArray(this._listeners)) {
+        this._listeners.forEach(l => {
+          try { if (l && l.ref && l.cb) l.ref.off('value', l.cb); } catch (e) {}
+        });
+      }
+    } catch (e) {}
+    this._listeners = [];
+  },
+
+  startRealtimeSync() {
+    this.stopRealtimeSync();
+    const db = this._getDb();
+    const root = this._userRoot();
+    if (!db || !root) return;
+
+    const bindValue = (path, onValue) => {
+      try {
+        const ref = db.ref(path);
+        const cb = (snap) => {
+          try { onValue(snap ? snap.val() : null); } catch (e) {}
+        };
+        ref.on('value', cb);
+        this._listeners.push({ ref, cb });
+      } catch (e) {}
+    };
+
+    bindValue(`${root}/trades`, (v) => {
+      this._trades = Array.isArray(v) ? v : [];
+      this._emitChange('trades');
+    });
+    bindValue(`${root}/history`, (v) => {
+      this._history = Array.isArray(v) ? v : [];
+      this._emitChange('history');
+    });
+    bindValue(`${root}/settings`, (v) => {
+      this._settings = { ...this._defaults(), ...(v || {}) };
+      this._emitChange('settings');
+    });
+    bindValue(`${root}/botState`, (v) => {
+      this._botState = v || { running: false, updatedAt: new Date().toISOString() };
+      this._emitChange('botState');
+    });
   },
 
   async getUserProfile(uid) {
@@ -151,6 +216,7 @@ const storage = {
 
     const root = this._userRoot();
     if (root) this._remoteSet(`${root}/trades`, this._trades);
+    try { this._emitChange('trades'); } catch (e) {}
   },
 
   getTrades() {
@@ -165,6 +231,7 @@ const storage = {
 
       const root = this._userRoot();
       if (root) this._remoteSet(`${root}/trades`, trades);
+      try { this._emitChange('trades'); } catch (e) {}
     }
   },
 
@@ -175,6 +242,7 @@ const storage = {
 
     const root = this._userRoot();
     if (root) this._remoteSet(`${root}/trades`, filtered);
+    try { this._emitChange('trades'); } catch (e) {}
   },
 
   // History
@@ -186,6 +254,7 @@ const storage = {
 
     const root = this._userRoot();
     if (root) this._remoteSet(`${root}/history`, history);
+    try { this._emitChange('history'); } catch (e) {}
   },
 
   getHistory() {
@@ -198,6 +267,7 @@ const storage = {
 
     const root = this._userRoot();
     if (root) this._remoteSet(`${root}/settings`, this._settings);
+    try { this._emitChange('settings'); } catch (e) {}
   },
 
   getSettings() {
@@ -232,6 +302,7 @@ const storage = {
     this._botState = botState || null;
     const root = this._userRoot();
     if (root) this._remoteSet(`${root}/botState`, botState);
+    try { this._emitChange('botState'); } catch (e) {}
   },
 
   getBotState() {

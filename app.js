@@ -1,6 +1,7 @@
 // Ana Trading Bot Motoru — Gerçek Zamanlı Binance Verileri
 const bot = {
   isRunning: false,
+  serverWorkerMode: true,
   settings: {},
   chart: null,
   candleSeries: null,
@@ -30,6 +31,18 @@ const bot = {
     this.updateStats();
     this._updateAgentStats();        // ajan panelini güncelle
 
+    try {
+      if (typeof storage !== 'undefined' && typeof storage.subscribe === 'function') {
+        storage.subscribe(() => {
+          try { this.loadTrades(); } catch (e) {}
+          try { this.loadHistory(); } catch (e) {}
+          try { this.updateStats(); } catch (e) {}
+          try { this.updateBalanceDisplay(); } catch (e) {}
+          try { if (this.settings.agentMode) this._updateAgentStats(); } catch (e) {}
+        });
+      }
+    } catch (e) {}
+
     // Her 2 saniyede TP/SL/timeout kontrolü + ekran güncelle
     this.updateInterval = setInterval(() => this._tick(), 2000);
 
@@ -57,7 +70,7 @@ const bot = {
 
     // Mum kapandığında → strateji sinyali
     market.onCandleClose = (candle) => {
-      if (this.isRunning) this._runStrategy();
+      if (!this.serverWorkerMode && this.isRunning) this._runStrategy();
     };
 
     this._updateStatus('Bağlanıyor...');
@@ -155,7 +168,7 @@ const bot = {
     if (this.signalTimer) clearInterval(this.signalTimer);
     const sec = (this.settings.signalInterval || 30) * 1000;
     this.signalTimer = setInterval(() => {
-      if (this.isRunning) this._runStrategy();
+      if (!this.serverWorkerMode && this.isRunning) this._runStrategy();
     }, sec);
     this._log(`Sinyal timer: her ${this.settings.signalInterval || 30} saniyede bir`);
   },
@@ -312,6 +325,15 @@ const bot = {
 
   // ─── Ana tick döngüsü ────────────────────────────────────────────────────
   _tick() {
+    if (this.serverWorkerMode) {
+      try {
+        this.loadTrades();
+        this.loadHistory();
+        this.updateStats();
+        if (this.settings.agentMode) this._updateAgentStats();
+      } catch (e) {}
+      return;
+    }
     const trades = storage.getTrades();
     trades.forEach(t => { if (t.status === 'open') this._checkExits(t); });
 
@@ -432,6 +454,7 @@ const bot = {
 
   // Ana sinyal noktası: ajan modu veya klasik strateji
   _runStrategy() {
+    if (this.serverWorkerMode) return;
     if (this.settings.agentMode) return this._runAgent();
     return this._runClassicStrategy();
   },
@@ -525,11 +548,13 @@ const bot = {
   },
 
   openTrade(direction, amount, tpPercent, reason = '', extras = {}) {
-    if (!auth.currentUser || auth.currentUser.balance < amount) {
-      this._showToast('Yetersiz bakiye!', 'red');
-      this._log('Yetersiz bakiye!', 'warn');
+    if (this.serverWorkerMode) {
+      this._showToast('Sunucu bot modu: işlem açma sadece VPS tarafında', 'red');
       return;
     }
+    const balance = auth.currentUser?.balance || 0;
+    if (balance < amount) { this._showToast('Bakiye yetersiz!', 'red'); return; }
+
     const entryPrice = market.currentPrice;
     if (!entryPrice) { this._showToast('Fiyat verisi yok!', 'red'); return; }
 
@@ -565,6 +590,10 @@ const bot = {
   },
 
   closeTrade(trade, reason = 'manual') {
+    if (this.serverWorkerMode) {
+      this._showToast('Sunucu bot modu: işlem kapama sadece VPS tarafında', 'red');
+      return;
+    }
     const exitPrice = market.currentPrice;
     const rawProfit = strategy.calculateProfit(trade.entryPrice, exitPrice, trade.amount, trade.direction);
     // Gerçekçi round-trip işlem ücreti: giriş + çıkış toplamının %0.1'i
@@ -662,7 +691,7 @@ const bot = {
         this._log(`Robot BAŞLATILDI [${mode}] — Hedef: +$${(this.baseBalance * this.cycleTarget).toFixed(2)} kâr`, 'buy');
         this._showToast(`Robot başlatıldı [${mode}]`, 'green');
       }
-      setTimeout(() => this._runStrategy(), 800);
+      if (!this.serverWorkerMode) setTimeout(() => this._runStrategy(), 800);
     } else {
       if (btn)    { btn.textContent = '▶ Başlat'; btn.className = 'btn btn-success px-3 py-2 text-xs'; }
       if (bigBtn) { bigBtn.textContent = '▶ Başlat'; bigBtn.style.background = 'linear-gradient(135deg,#10b981,#059669)'; }
