@@ -110,6 +110,14 @@ const auth = {
     document.getElementById('mainApp').classList.remove('hidden');
     document.getElementById('userDisplay').textContent = this.currentUser.name;
     storage.setCurrentUser(this.currentUser);
+    try {
+      const badge = document.getElementById('uidBadge');
+      if (badge && this.currentUser?.id) {
+        badge.textContent = 'UID: ' + this.currentUser.id.slice(0, 8) + '…';
+        badge.style.display = '';
+        badge.title = 'VPS ecosystem.config.js için UID: ' + this.currentUser.id + ' — tıkla kopyala';
+      }
+    } catch (e) {}
     await storage.pullUserData();
 
     try {

@@ -100,6 +100,7 @@
       <!-- Controls -->
       <div class="flex items-center gap-2 shrink-0">
         <span class="text-xs text-slate-500 hide-mobile" id="botStatus">—</span>
+        <span id="uidBadge" class="hide-mobile text-xs font-mono px-2 py-1 rounded cursor-pointer" title="VPS için UID — tıkla kopyala" style="background:rgba(59,130,246,.12);color:#60a5fa;display:none;" onclick="(()=>{const u=auth.currentUser?.id||'';if(!u)return;navigator.clipboard.writeText(u).then(()=>{this.textContent='✓ Kopyalandı!';setTimeout(()=>this.textContent='UID: '+u.slice(0,8)+'…',1500)})})()"></span>
         <button id="masterToggle" class="btn btn-success px-3 py-2 text-xs" onclick="bot.toggleTrading()">▶ Başlat</button>
         <button class="btn btn-ghost p-2" onclick="auth.logout()" title="Çıkış">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
